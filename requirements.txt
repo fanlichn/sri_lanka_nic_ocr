@@ -3,11 +3,16 @@ uvicorn[standard]>=0.29,<1.0
 python-multipart>=0.0.9
 pydantic>=2.6,<3.0
 pydantic-settings>=2.2,<3.0
+
 opencv-python-headless>=4.9,<5.0
-numpy>=1.24,<2.0
+numpy==1.26.4
 pillow>=10.0,<11.0
-# OCR engine (CPU). 如需 GPU，请把 paddlepaddle 换成 paddlepaddle-gpu==2.6.1
-paddlepaddle==2.6.1
-paddleocr>=2.7,<3.0
-# 仅当 NIC_OCR_OCR_ENGINE=tesseract 时需要（另需安装 tesseract 系统二进制）
+
+# OCR engine (CPU)
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+pyclipper==1.3.0.post5
+chardet==5.2.0
+
+# 仅当 NIC_OCR_OCR_ENGINE=tesseract 时需要
 # pytesseract>=0.3.10
