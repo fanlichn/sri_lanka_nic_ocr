@@ -99,6 +99,38 @@ curl -X POST http://localhost:8000/ocr_base64 \
   -d '{"image_base64": "<BASE64编码的图片>"}'
 ```
 
+### 图片 URL（OSS / S3 / CDN 等公开链接）
+
+服务端会直接下载图片并识别，适合图片已存在对象存储（如阿里云 OSS）的场景：
+
+```bash
+curl -X POST http://localhost:8000/ocr_url \
+  -H "Content-Type: application/json" \
+  -d '{"image_url": "https://lak-pic.oss-ap-southeast-1.aliyuncs.com/attachment/ID_FRONT/3100435890/202609/3100435890_1789889899894_af49363b.jpg"}'
+```
+
+```python
+import requests
+
+resp = requests.post(
+    "http://localhost:8000/ocr_url",
+    json={"image_url": "https://lak-pic.oss-ap-southeast-1.aliyuncs.com/attachment/ID_FRONT/xxx.jpg"},
+    timeout=60,
+)
+print(resp.json())
+```
+
+URL 下载相关配置（环境变量，前缀 `NIC_OCR_`）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `NIC_OCR_URL_FETCH_TIMEOUT_SECONDS` | `10` | 下载超时（秒） |
+| `NIC_OCR_URL_FETCH_ALLOW_PRIVATE_HOSTS` | `false` | 是否允许内网/私有地址，生产保持 `false`（SSRF 防护） |
+
+下载失败、非图片内容、超过 `NIC_OCR_MAX_UPLOAD_BYTES` 等情况均返回 `400` 并带中文错误说明。
+
+> **私有 Bucket 注意**：若 OSS Bucket 开了私有读写，需在业务服务端生成**带签名的临时 URL**（如 `oss2.Bucket.sign_url`，设置较短过期时间）再传给本接口，不要把 AccessKey 提供给 OCR 服务。
+
 ### Python 调用
 
 ```python

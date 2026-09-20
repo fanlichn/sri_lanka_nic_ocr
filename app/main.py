@@ -14,6 +14,7 @@ from .extractor import extract
 from .ocr_engine import create_engine
 from .preprocessing import build_variants, load_image
 from .schemas import ExtractedResult
+from .url_fetch import UrlFetchError, fetch_image_bytes
 
 _engine = None
 
@@ -39,6 +40,10 @@ app = FastAPI(
 
 class Base64Request(BaseModel):
     image_base64: str
+
+
+class UrlRequest(BaseModel):
+    image_url: str
 
 
 def _recognize(buf: bytes) -> ExtractedResult:
@@ -83,4 +88,17 @@ async def ocr_base64(req: Base64Request):
         buf = base64.b64decode(req.image_base64, validate=True)
     except (binascii.Error, ValueError):
         raise HTTPException(status_code=400, detail="无效的 base64 图片数据")
+    return _recognize(buf)
+
+
+@app.post("/ocr_url", response_model=ExtractedResult)
+def ocr_url(req: UrlRequest):
+    """从图片 URL（OSS/S3/CDN 等公开链接）下载并识别。
+
+    同步接口：下载与 OCR 均在线程池中执行，不阻塞事件循环。
+    """
+    try:
+        buf = fetch_image_bytes(req.image_url, get_settings())
+    except UrlFetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return _recognize(buf)

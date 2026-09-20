@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 15 * 1024 * 1024  # 15 MB
     workers: int = 2
 
+    # ---- Remote image fetching (POST /ocr_url) ----
+    url_fetch_timeout_seconds: float = 10.0
+    # False: reject URLs resolving to private/loopback addresses (SSRF guard)
+    url_fetch_allow_private_hosts: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
