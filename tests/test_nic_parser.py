@@ -65,3 +65,17 @@ def test_normalization():
     info = parse_nic(" 912680444 v ")
     assert info.valid
     assert info.normalized == "912680444V"
+
+
+def test_old_nic_8_digit_missing_check():
+    info = parse_nic("84575796")
+    assert info.valid
+    assert info.nic_type == "old"
+    assert info.gender == "female"
+    assert info.check_digit is None
+    assert info.reason and "missing check digit" in info.reason
+
+
+def test_new_nic_nic366_matches_printed_dob():
+    info = parse_nic("198227210059", day_mode="nic366")
+    assert info.birth_date == "1982-09-28"

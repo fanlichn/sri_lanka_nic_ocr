@@ -4,6 +4,7 @@ Supported formats
 -----------------
 * Old (pre-2016)  -> 9 digits + letter, e.g. ``912680444V``
   layout: ``YY DDD SSS C V/X``
+  (8 digits + letter, i.e. missing the check digit, is also accepted)
 * New (2016+)     -> 12 digits, e.g. ``198512345678``
   layout: ``YYYY DDD SSSS C``
 
@@ -20,7 +21,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 
-_OLD_RE = re.compile(r"^(\d{9})([vVxX])$")
+_OLD_RE = re.compile(r"^(\d{8,9})([vVxX])?$")
 _NEW_RE = re.compile(r"^(\d{12})$")
 
 
@@ -88,6 +89,7 @@ def normalize_nic(text: str) -> str:
         .replace(".", "")
         .replace("\u2013", "")
         .replace("\u2014", "")
+        .upper()
     )
 
 
@@ -103,10 +105,13 @@ def parse_nic(nic: str, *, day_mode: str = "literal", old_century: int = 1900) -
 
     m_old = _OLD_RE.match(norm)
     if m_old:
-        digits, letter = m_old.group(1), m_old.group(2).upper()
+        digits = m_old.group(1)
+        letter = m_old.group(2).upper() if m_old.group(2) else None
         year = old_century + int(digits[0:2])
         ddd = int(digits[2:5])
-        return _build("old", norm, year, ddd, digits[5:8], digits[8], letter, day_mode)
+        serial = digits[5:8]
+        check = digits[8] if len(digits) == 9 else None
+        return _build("old", norm, year, ddd, serial, check, letter, day_mode)
 
     m_new = _NEW_RE.match(norm)
     if m_new:
@@ -133,6 +138,8 @@ def _build(nic_type, norm, year, ddd, serial, check, letter, day_mode) -> NicInf
     is_voter = None if letter is None else (letter == "V")
 
     reasons = []
+    if nic_type == "old" and check is None:
+        reasons.append("missing check digit")
     if dob is None:
         reasons.append("day code out of range for birth year")
 

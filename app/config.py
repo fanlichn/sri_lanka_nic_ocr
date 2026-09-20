@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     # ---- NIC decoding ----
     # "literal": read day-of-year code literally (Jan 1 == day 001)
     # "nic366":  compensate the fixed 366-day calendar used by SL NICs
-    #            (recovers real DOB for non-leap-year births on/after 1 Mar)
-    nic_day_mode: str = "literal"
+    #            (recovers real DOB for non-leap-year births on/after 1 Mar).
+    #            Default nic366 matches the printed DOB on real cards.
+    nic_day_mode: str = "nic366"
     old_nic_century: int = 1900
 
     # ---- HTTP server ----

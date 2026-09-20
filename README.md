@@ -272,7 +272,7 @@ nssm status NicOcr       # 查看状态
 | `NIC_OCR_OCR_LANG` | `en` | 语言：PaddleOCR 用 `en`；Tesseract 用 `eng`（可加 `sin`） |
 | `NIC_OCR_PADDLE_USE_GPU` | `false` | 是否使用 GPU |
 | `NIC_OCR_PADDLE_USE_ANGLE_CLS` | `true` | 是否启用方向分类 |
-| `NIC_OCR_NIC_DAY_MODE` | `literal` | 出生日期解码模式：`literal` / `nic366`（见下） |
+| `NIC_OCR_NIC_DAY_MODE` | `nic366` | 出生日期解码模式：`nic366`（推荐，匹配真实出生日期）/ `literal`（见下） |
 | `NIC_OCR_OLD_NIC_CENTURY` | `1900` | 旧版号码两位年份的前缀 |
 | `NIC_OCR_HOST` | `0.0.0.0` | 监听地址 |
 | `NIC_OCR_PORT` | `8000` | 监听端口 |
@@ -291,10 +291,10 @@ nssm status NicOcr       # 查看状态
 
 **366 天日历偏移（重要）**：政府编号方案使用「固定 366 天日历」，每年都为 2 月 29 日预留一个位置。因此在非闰年、出生日在 3 月 1 日及之后时，号码中的 `DDD` 比真实「年内第几天」大 1。
 
-- 默认 `literal`：按字面天数解码（`Jan 1 + (DDD - 1)` 天），简单直观，但对非闰年 3 月之后的生日会偏大 1 天。
-- `nic366`：补偿 366 天日历，还原真实出生日期（3 月之后非闰年生日减 1 天）。
+- 默认 `nic366`：补偿 366 天日历，还原真实出生日期（3 月之后非闰年生日减 1 天）；实测与卡片印刷的出生日期一致。
+- `literal`：按字面天数解码（`Jan 1 + (DDD - 1)` 天），简单直观，但对非闰年 3 月之后的生日会偏大 1 天。
 
-由于卡片本身印刷了出生日期，本服务**优先采用 OCR 识别的印刷日期**，号码解码结果作为兜底与交叉校验；两者不一致时会写入 `warnings`。如需切换解码模式，设置 `NIC_OCR_NIC_DAY_MODE=nic366` 即可。
+由于卡片本身印刷了出生日期，本服务**优先采用 OCR 识别的印刷日期**，号码解码结果作为兜底与交叉校验；两者不一致时会写入 `warnings`。如需改回字面天数解码，设置 `NIC_OCR_NIC_DAY_MODE=literal` 即可。
 
 > 参考：[DRP 官方 FAQ](https://drp.gov.lk/en/faq.php)、[Understanding Sri Lanka's NIC System](https://thesrilanka.lk/info/national-identity-card/understanding-sri-lankan-nic-system/)、[lk-id（TypeScript 实现，含 366 天日历说明）](https://www.npmjs.com/package/lk-id)、[lka-nic-decoder（Python 实现）](https://pypi.org/project/lka-nic-decoder/)。
 

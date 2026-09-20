@@ -25,6 +25,7 @@ _DIGIT_MAP = str.maketrans(
         "G": "6",
         "T": "7",
         "B": "8",
+        "F": "8",
     }
 )
 
@@ -37,6 +38,8 @@ _ISSUE_LABELS = ["date of issue", "issued on", "issue date", "issued date"]
 _DATE_FULL = [
     re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
     re.compile(r"(?<!\d)(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})(?!\d)"),
+    # 年份首位被 OCR 丢掉，如 "997.12-25" -> 1997-12-25
+    re.compile(r"(?<!\d)(\d{3})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
 ]
 
 
@@ -53,6 +56,8 @@ def _normalize_date(s: str) -> Optional[str]:
         g = m.groups()
         if len(g[0]) == 4:
             y, mo, d = int(g[0]), int(g[1]), int(g[2])
+        elif len(g[0]) == 3:
+            y, mo, d = 1000 + int(g[0]), int(g[1]), int(g[2])
         else:
             d, mo, y = int(g[0]), int(g[1]), int(g[2])
         try:
@@ -62,27 +67,65 @@ def _normalize_date(s: str) -> Optional[str]:
     return None
 
 
-def _find_nic(lines: List[OcrLine]) -> Optional[str]:
-    # Prefer high-confidence lines first.
+def _find_nic(lines: List[OcrLine]) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(nic_number, note)``.
+
+    ``note`` is a non-empty warning when the match was lenient (OCR confusion
+    correction applied, or a check digit / V-X letter appears to be missing).
+    """
     ordered = sorted(lines, key=lambda l: l.confidence, reverse=True)
     for ln in ordered:
+        # 1) token-level match (preferred)
         for tok in re.findall(r"[0-9A-Za-z]+", ln.text):
-            if re.fullmatch(r"[0-9A-Za-z]{9}[VXvx]", tok):
-                digits = tok[:9].translate(_DIGIT_MAP)
-                if digits.isdigit():
-                    return digits + tok[9].upper()
+            if len(tok) < 8 or sum(c.isdigit() for c in tok) < 5:
+                continue
+            if re.fullmatch(r"\d{12}", tok):
+                return tok, None
             if re.fullmatch(r"[0-9A-Za-z]{12}", tok):
-                digits = tok.translate(_DIGIT_MAP)
-                if digits.isdigit():
-                    return digits
-    return None
+                d = tok.translate(_DIGIT_MAP)
+                if d.isdigit():
+                    return d, "已应用 OCR 数字纠错"
+            if re.fullmatch(r"[0-9A-Za-z]{9}[VXvx]", tok):
+                d = tok[:9].translate(_DIGIT_MAP)
+                if d.isdigit():
+                    return d + tok[9].upper(), None
+            if re.fullmatch(r"[0-9A-Za-z]{8}[VXvx]", tok):
+                d = tok[:8].translate(_DIGIT_MAP)
+                if d.isdigit():
+                    return d + tok[8].upper(), "可能缺少校验位"
+            if re.fullmatch(r"[0-9A-Za-z]{9}", tok):
+                d = tok.translate(_DIGIT_MAP)
+                if d.isdigit():
+                    return d, "末尾 V/X 字母可能被 OCR 遗漏"
+            if re.fullmatch(r"[0-9A-Za-z]{8}", tok):
+                d = tok.translate(_DIGIT_MAP)
+                if d.isdigit():
+                    return d, "可能缺少校验位与末尾字母"
+        # 2) whole-line scan (number split by spaces, e.g. "85542015 V")
+        compact = re.sub(r"[^0-9A-Za-z]", "", ln.text)
+        m = re.search(r"(\d{12})", compact)
+        if m:
+            return m.group(1), None
+        m = re.search(r"([0-9A-Za-z]{9})([VXvx])", compact)
+        if m:
+            d = m.group(1).translate(_DIGIT_MAP)
+            if d.isdigit():
+                return d + m.group(2).upper(), None
+        m = re.search(r"([0-9A-Za-z]{8})([VXvx])", compact)
+        if m:
+            d = m.group(1).translate(_DIGIT_MAP)
+            if d.isdigit():
+                return d + m.group(2).upper(), "可能缺少校验位"
+    return None, None
 
 
 def _value_after_label(line_text: str, labels: List[str]) -> Optional[str]:
     for lbl in labels:
         m = re.search(re.escape(lbl) + r"\s*[:：]?\s*(.+)", line_text, re.IGNORECASE)
-        if m and m.group(1).strip():
-            return m.group(1).strip()
+        if m:
+            val = m.group(1).strip(" .:：-")
+            if val:
+                return val
     return None
 
 
@@ -111,11 +154,20 @@ def _extract_label(lines: List[OcrLine], labels: List[str]) -> Optional[str]:
             return val
     # 2) label on its own line, value on the line below
     for i, ln in enumerate(lines):
-        t = ln.text.strip().lower()
-        if any(t == lbl.lower() or t.rstrip(":").lower() == lbl.lower() for lbl in labels):
+        t = ln.text.strip().strip(":：. ").lower()
+        if any(t == lbl.lower() for lbl in labels):
             val = _value_from_line_below(i, lines, ln)
             if val:
                 return val
+    return None
+
+
+def _find_date_anywhere(lines: List[OcrLine]) -> Optional[str]:
+    """Fallback: scan all lines for any date-like string."""
+    for ln in lines:
+        d = _normalize_date(ln.text)
+        if d:
+            return d
     return None
 
 
@@ -133,7 +185,7 @@ def _normalize_gender(s: Optional[str]) -> Optional[str]:
 def extract(lines: List[OcrLine], settings) -> ExtractedResult:
     warnings: List[str] = []
 
-    nic_text = _find_nic(lines)
+    nic_text, nic_note = _find_nic(lines)
     nic_info: Optional[NicInfo] = None
     if nic_text:
         nic_info = parse_nic(
@@ -143,6 +195,8 @@ def extract(lines: List[OcrLine], settings) -> ExtractedResult:
         )
         if not nic_info.valid:
             warnings.append(f"NIC 号码格式可疑: {nic_text}" + (f" ({nic_info.reason})" if nic_info.reason else ""))
+        elif nic_note:
+            warnings.append(f"NIC 号码({nic_text}) {nic_note}，请人工复核")
 
     name = _extract_label(lines, _NAME_LABELS)
     dob_printed = _extract_label(lines, _DOB_LABELS)
@@ -151,6 +205,8 @@ def extract(lines: List[OcrLine], settings) -> ExtractedResult:
     issue_date = _extract_label(lines, _ISSUE_LABELS)
 
     dob_iso = _normalize_date(dob_printed) if dob_printed else None
+    if not dob_iso:
+        dob_iso = _find_date_anywhere(lines)
     gender = gender_printed or (nic_info.gender if nic_info and nic_info.gender != "unknown" else None)
 
     # Cross-check: decoded DOB vs printed DOB.
