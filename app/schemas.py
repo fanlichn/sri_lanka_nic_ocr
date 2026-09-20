@@ -30,6 +30,10 @@ class ExtractedResult(BaseModel):
     nic_number: Optional[str] = None
     nic: Optional[NicOut] = None
     name: Optional[str] = None
+    # 多语言姓名占位字段：当前 OCR 引擎仅支持拉丁文字，
+    # 僧伽罗语/泰米尔语姓名需多语言 OCR 支持（见 README「多语言姓名」）
+    name_sinhala: Optional[str] = None
+    name_tamil: Optional[str] = None
     date_of_birth: Optional[str] = None
     gender: Optional[str] = None
     address: Optional[str] = None

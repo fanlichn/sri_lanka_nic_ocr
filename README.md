@@ -7,7 +7,9 @@
 | 字段 | 说明 |
 | --- | --- |
 | `nic_number` | 身份证号码（旧版 9 位数字 + V/X，或新版 12 位数字） |
-| `name` | 姓名 |
+| `name` | 英文姓名（支持跨行合并，自动拼接 `Name:` 标签下方 1-2 行续行） |
+| `name_sinhala` | 僧伽罗语姓名（占位字段，当前为 `null`，见「多语言姓名」） |
+| `name_tamil` | 泰米尔语姓名（占位字段，当前为 `null`，见「多语言姓名」） |
 | `date_of_birth` | 出生日期（优先取卡片印刷值，缺失时由号码解码） |
 | `gender` | 性别（卡片印刷值优先，缺失时由号码解码） |
 | `address` | 地址 |
@@ -349,10 +351,29 @@ nssm status NicOcr       # 查看状态
 
 ---
 
+## 多语言姓名
+
+斯里兰卡身份证正面的姓名以三种文字印刷：**英语（拉丁字母）、泰米尔语、僧伽罗语**。
+
+当前实现说明：
+
+- `name` 字段只返回**英文姓名**，且已支持跨行合并（`Name:` 标签下方的字母续行会自动拼接，见 `extractor.py` 的 `_find_full_name`）。
+- `name_sinhala` / `name_tamil` 为**占位字段**，当前固定返回 `null`，仅为保持 API 结构稳定预留。
+- 默认 OCR 引擎 PaddleOCR 的通用模型仅覆盖拉丁文字，对僧伽罗语/泰米尔语印刷体无法可靠识别（僧伽罗语在 PaddleOCR 支持语言列表中缺失，泰米尔语需单独的 `ta` 模型）。
+- 当画面中检测到僧伽罗语（Unicode `\u0D80-\u0DFF`）或泰米尔语（`\u0B80-\u0BFF`）字符时，响应 `warnings` 中会出现对应提示，便于调用方感知该 limitation。
+
+后续若需补齐多语言姓名，可选方案：
+
+1. **Tesseract 混合语言包**：`apt install tesseract-ocr-sin tesseract-ocr-tam`，并设置 `NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin+tam`。精度一般，但零训练成本。
+2. **专用多语 OCR 引擎**（如 Tesseract 5 + 微调、EasyOCR 的 `si`/`ta`）：EasyOCR 支持 `si`（僧伽罗语）与 `ta`（泰米尔语），可作为第二引擎仅对姓名区域做补充识别。
+3. **云端 OCR API**：Google Cloud Vision 支持僧伽罗语/泰米尔语，识别质量最好，但需外网与密钥管理。
+
+---
+
 ## 常见问题（FAQ）
 
 **Q：识别不出姓名/地址？**
-A：这些字段依赖卡片上「Name / Address」等标签。若识别为空，先检查图片是否清晰、方向是否端正；可在 `extractor.py` 的标签列表里补充实际卡片使用的措辞（含僧伽罗语/泰米尔语标签）。
+A：这些字段依赖卡片上「Name / Address」等标签。若识别为空，先检查图片是否清晰、方向是否端正；可在 `extractor.py` 的标签列表里补充实际卡片使用的措辞（含僧伽罗语/泰米尔语标签）。长姓名跨行时，`_find_full_name` 会自动合并 `Name:` 标签正下方（水平落在取值列内、垂直距离不超过 2 倍行高）的至多 2 行字母续行；若卡片版式特殊导致合并遗漏，可调整 `_NAME_CONT_RE` / `_NON_NAME_KEYWORDS` 过滤规则。
 
 **Q：NIC 号码里混入了字母（如 0 识别成 O）？**
 A：`_find_nic` 已内置常见混淆纠正（O→0、I→1、S→5 等）。若仍失败，说明图片过糊，建议提高图片分辨率或改善光照。
@@ -363,5 +384,5 @@ A：多为 366 天日历偏移所致，见上文「已知偏移」，切换 `NIC
 **Q：校验位（最后一位）为何不做校验？**
 A：斯里兰卡 NIC 校验位算法未公开，无法可靠校验，故仅透传不校验。
 
-**Q：如何支持僧伽罗语姓名/地址？**
-A：Tesseract 支持 `sin` 语言包（`apt install tesseract-ocr-sin`），将 `NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin`。PaddleOCR 默认模型对僧伽罗语支持有限。
+**Q：如何支持僧伽罗语/泰米尔语姓名？**
+A：见上文「多语言姓名」小节。快速做法：Tesseract 装语言包后切引擎（`NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin+tam`）；更稳的做法是用 EasyOCR（支持 `si`/`ta`）或 Google Cloud Vision 做第二引擎补充识别。

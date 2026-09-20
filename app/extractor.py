@@ -29,11 +29,21 @@ _DIGIT_MAP = str.maketrans(
     }
 )
 
-_NAME_LABELS = ["full name", "name", "nama", "name in full"]
+_NAME_LABELS = ["full name", "name in full", "name", "nama"]
 _DOB_LABELS = ["date of birth", "birth date", "dob", "birthday"]
 _ADDRESS_LABELS = ["address", "permanent address", "present address", "residence"]
 _GENDER_LABELS = ["sex", "gender"]
 _ISSUE_LABELS = ["date of issue", "issued on", "issue date", "issued date"]
+
+# 英文姓名的续行（换行排版的第二行）：仅字母/空格/常见标点，不含数字
+_NAME_CONT_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]*$")
+_NON_NAME_KEYWORDS = (
+    "sex", "date", "birth", "address", "signature", "profession",
+    "civil status", "place of", "nic", "no.",
+)
+# 检测卡片上是否印有僧伽罗语/泰米尔语文字（Unicode 区段）
+_SINHALA_RE = re.compile(r"[\u0D80-\u0DFF]")
+_TAMIL_RE = re.compile(r"[\u0B80-\u0BFF]")
 
 _DATE_FULL = [
     re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
@@ -162,6 +172,69 @@ def _extract_label(lines: List[OcrLine], labels: List[str]) -> Optional[str]:
     return None
 
 
+def _line_height(box) -> float:
+    ys = [p[1] for p in box]
+    return max(max(ys) - min(ys), 1.0)
+
+
+def _clean_name(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip(" .:：-")
+
+
+def _find_full_name(lines: List[OcrLine]) -> Optional[str]:
+    """English full name: the ``Name:`` label-line value plus any continuation
+    line(s) printed directly below it (NICs commonly wrap long names)."""
+    best: Optional[tuple[OcrLine, str]] = None
+    for ln in lines:
+        for lbl in _NAME_LABELS:
+            m = re.search(re.escape(lbl) + r"\s*[:：]?\s*(.*)", ln.text, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip(" .:：-")
+                if val and (best is None or ln.confidence > best[0].confidence):
+                    best = (ln, val)
+                break
+    if best is None:
+        # label alone on its own line -> value on the next line (legacy path)
+        for i, ln in enumerate(lines):
+            t = ln.text.strip().strip(":：. ").lower()
+            if any(t == lbl.lower() for lbl in _NAME_LABELS):
+                below = _value_from_line_below(i, lines, ln)
+                if below:
+                    return _clean_name(below)
+        return None
+
+    label_ln, first_val = best
+    parts = [first_val]
+    h = _line_height(label_ln.box)
+    label_y = _line_center_y(label_ln.box)
+    label_x = label_ln.box[0][0]
+
+    conts: List[tuple[float, str]] = []
+    for other in lines:
+        if other is label_ln:
+            continue
+        y = _line_center_y(other.box)
+        x = other.box[0][0]
+        # directly below the label line (within ~2 line heights)
+        if not (0 < y - label_y <= 2.0 * h):
+            continue
+        # horizontally inside the value column (starts near/after the label)
+        if not (label_x - 0.5 * h <= x <= label_x + 5 * h):
+            continue
+        text = other.text.strip()
+        if not _NAME_CONT_RE.fullmatch(text):
+            continue
+        low = text.lower()
+        if any(k in low for k in _NON_NAME_KEYWORDS):
+            continue
+        conts.append((y, text))
+
+    conts.sort(key=lambda t: t[0])
+    for _, text in conts[:2]:  # names wrap to at most 2 extra lines
+        parts.append(text)
+    return _clean_name(" ".join(parts))
+
+
 def _find_date_anywhere(lines: List[OcrLine]) -> Optional[str]:
     """Fallback: scan all lines for any date-like string."""
     for ln in lines:
@@ -198,11 +271,18 @@ def extract(lines: List[OcrLine], settings) -> ExtractedResult:
         elif nic_note:
             warnings.append(f"NIC 号码({nic_text}) {nic_note}，请人工复核")
 
-    name = _extract_label(lines, _NAME_LABELS)
+    name = _find_full_name(lines)
     dob_printed = _extract_label(lines, _DOB_LABELS)
     gender_printed = _normalize_gender(_extract_label(lines, _GENDER_LABELS))
     address = _extract_label(lines, _ADDRESS_LABELS)
     issue_date = _extract_label(lines, _ISSUE_LABELS)
+
+    # 僧伽罗语/泰米尔语姓名占位：当前引擎仅支持拉丁文字
+    full_text = " ".join(l.text for l in lines)
+    if _SINHALA_RE.search(full_text):
+        warnings.append("检测到僧伽罗语文字，name_sinhala 字段暂不支持识别")
+    if _TAMIL_RE.search(full_text):
+        warnings.append("检测到泰米尔语文字，name_tamil 字段暂不支持识别")
 
     dob_iso = _normalize_date(dob_printed) if dob_printed else None
     if not dob_iso:
