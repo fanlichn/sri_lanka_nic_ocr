@@ -1,0 +1,31 @@
+services:
+  nic-ocr:
+    build: .
+    image: sri-lanka-nic-ocr:latest
+    container_name: nic-ocr
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      NIC_OCR_OCR_ENGINE: paddle
+      NIC_OCR_OCR_LANG: en
+      NIC_OCR_PADDLE_USE_GPU: "false"
+      NIC_OCR_PADDLE_USE_ANGLE_CLS: "true"
+      NIC_OCR_NIC_DAY_MODE: literal
+      NIC_OCR_OLD_NIC_CENTURY: "1900"
+      NIC_OCR_WORKERS: "2"
+      NIC_OCR_MAX_UPLOAD_BYTES: "15728640"
+    # 若使用 GPU，取消注释并设置 device_requests 与 paddle_use_gpu
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s

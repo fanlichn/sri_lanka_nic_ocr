@@ -1,0 +1,335 @@
+# 斯里兰卡身份证 OCR 识别服务
+
+面向生产环境的斯里兰卡（Sri Lanka）国民身份证（National Identity Card，简称 NIC）识别服务。输入一张身份证照片，自动抽取结构化字段并以 JSON 返回。
+
+识别字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `nic_number` | 身份证号码（旧版 9 位数字 + V/X，或新版 12 位数字） |
+| `name` | 姓名 |
+| `date_of_birth` | 出生日期（优先取卡片印刷值，缺失时由号码解码） |
+| `gender` | 性别（卡片印刷值优先，缺失时由号码解码） |
+| `address` | 地址 |
+| `date_of_issue` | 签发日期 |
+| `nic.*` | 号码解码结果（类型、出生年份、性别、是否选民 V/X、序列号等） |
+
+> 身份证号码的出生日期/性别解码遵循官方规则：旧版 `YY DDD SSS C V/X`，新版 `YYYY DDD SSSS C`，其中 `DDD` 为一年中的第几天，女性 +500。参考 [DRP 官方 FAQ](https://drp.gov.lk/en/faq.php)。
+
+---
+
+## 目录结构
+
+```
+sri_lanka_nic_ocr/
+├── app/
+│   ├── __init__.py
+│   ├── config.py         # 配置（环境变量 .env）
+│   ├── nic_parser.py     # NIC 号码解析（出生日期/性别/校验）
+│   ├── preprocessing.py  # OpenCV 图像预处理（缩放/去噪/纠偏/二值化）
+│   ├── ocr_engine.py     # OCR 引擎封装（PaddleOCR / Tesseract）
+│   ├── extractor.py      # 字段抽取（标签匹配 + 正则）
+│   ├── schemas.py        # 响应模型
+│   ├── main.py           # FastAPI 服务
+│   └── cli.py            # 命令行单图测试
+├── tests/
+│   └── test_nic_parser.py
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
+
+---
+
+## 环境要求
+
+- Python 3.10+
+- 内存建议 ≥ 2 GB（PaddleOCR 模型加载后约占 1 GB+）
+- 可选：NVIDIA GPU（需 `paddlepaddle-gpu` 与 CUDA 环境）
+
+---
+
+## 快速开始（本地开发）
+
+```bash
+# 1. 创建并激活虚拟环境
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+
+# 2. 安装依赖（首次会下载 PaddleOCR 模型，耗时较长）
+pip install -r requirements.txt
+
+# 3. （可选）复制配置
+copy .env.example .env        # Windows
+cp .env.example .env          # Linux/macOS
+
+# 4. 启动服务
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 5. 单图命令行测试（无需启动服务）
+python -m app.cli path/to/id_card.jpg
+```
+
+启动成功后访问：
+
+- 接口文档（Swagger UI）：<http://localhost:8000/docs>
+- 健康检查：<http://localhost:8000/health>
+
+---
+
+## API 使用示例
+
+### 上传图片（multipart）
+
+```bash
+curl -X POST http://localhost:8000/ocr \
+  -F "file=@id_card.jpg"
+```
+
+### Base64（JSON）
+
+```bash
+curl -X POST http://localhost:8000/ocr_base64 \
+  -H "Content-Type: application/json" \
+  -d '{"image_base64": "<BASE64编码的图片>"}'
+```
+
+### Python 调用
+
+```python
+import requests
+
+with open("id_card.jpg", "rb") as f:
+    resp = requests.post("http://localhost:8000/ocr", files={"file": f})
+print(resp.json())
+```
+
+返回示例：
+
+```json
+{
+  "success": true,
+  "nic_number": "198512345678",
+  "nic": {
+    "valid": true,
+    "normalized": "198512345678",
+    "nic_type": "new",
+    "birth_year": 1985,
+    "gender": "male",
+    "birth_date": "1985-05-03",
+    "is_voter": null,
+    "serial": "4567",
+    "check_digit": "8"
+  },
+  "name": "JOHN DOE",
+  "date_of_birth": "1985-05-03",
+  "gender": "male",
+  "address": "NO. 123, MAIN ROAD, COLOMBO",
+  "date_of_issue": "2016-06-01",
+  "lines": [],
+  "warnings": [],
+  "elapsed_ms": 812.3
+}
+```
+
+---
+
+## 生产部署
+
+### 方案一：Docker Compose（推荐）
+
+```bash
+# 构建并后台启动（restart: unless-stopped 会自动拉起）
+docker compose up -d --build
+
+# 查看日志
+docker compose logs -f
+
+# 查看状态
+docker compose ps
+```
+
+### 方案二：Docker 单容器
+
+```bash
+docker build -t sri-lanka-nic-ocr:latest .
+
+docker run -d --name nic-ocr \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -e NIC_OCR_OCR_ENGINE=paddle \
+  -e NIC_OCR_PADDLE_USE_GPU=false \
+  sri-lanka-nic-ocr:latest
+```
+
+### 方案三：Linux 裸机 + systemd
+
+1. 按「快速开始」安装依赖到某个虚拟环境，例如 `/opt/nic-ocr/.venv`。
+2. 创建服务文件 `/etc/systemd/system/nic-ocr.service`：
+
+```ini
+[Unit]
+Description=Sri Lanka NIC OCR Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nic-ocr
+EnvironmentFile=/opt/nic-ocr/.env
+ExecStart=/opt/nic-ocr/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+Restart=always
+RestartSec=5
+User=nic-ocr
+StandardOutput=append:/var/log/nic-ocr/out.log
+StandardError=append:/var/log/nic-ocr/err.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3. 启动并设为开机自启：
+
+```bash
+sudo mkdir -p /var/log/nic-ocr
+sudo systemctl daemon-reload
+sudo systemctl enable --now nic-ocr
+```
+
+### 方案四：Windows 裸机
+
+使用 [NSSM](https://nssm.cc/) 将服务注册为 Windows 服务：
+
+```powershell
+nssm install NicOcr "C:\path\to\.venv\Scripts\uvicorn.exe"
+nssm set NicOcr AppParameters "app.main:app --host 0.0.0.0 --port 8000 --workers 2"
+nssm set NicOcr AppDirectory "C:\path\to\sri_lanka_nic_ocr"
+nssm set NicOcr AppStdout "C:\path\to\logs\out.log"
+nssm set NicOcr AppStderr "C:\path\to\logs\err.log"
+nssm set NicOcr Start SERVICE_AUTO_START
+nssm start NicOcr
+```
+
+也可用「任务计划程序」在开机时运行 `uvicorn app.main:app ...`（选择「无论用户是否登录都运行」）。
+
+---
+
+## 重启 / 更新 / 回滚
+
+### Docker Compose
+
+```bash
+# 重启（不重建）
+docker compose restart
+
+# 更新代码后：重建并滚动更新
+git pull
+docker compose up -d --build
+
+# 回滚到上一个镜像标签（示例）
+docker compose down
+docker run -d --name nic-ocr -p 8000:8000 sri-lanka-nic-ocr:v1.0.0
+```
+
+### Docker 单容器
+
+```bash
+docker restart nic-ocr          # 重启
+docker stop nic-ocr && docker rm nic-ocr && docker run -d ...   # 重建
+```
+
+### systemd（Linux）
+
+```bash
+sudo systemctl restart nic-ocr      # 重启
+sudo systemctl stop nic-ocr         # 停止
+sudo systemctl status nic-ocr       # 查看状态与最近日志
+sudo journalctl -u nic-ocr -f       # 跟踪日志
+```
+
+### Windows 服务（NSSM）
+
+```powershell
+nssm restart NicOcr      # 重启
+nssm stop NicOcr         # 停止
+nssm start NicOcr        # 启动
+nssm status NicOcr       # 查看状态
+```
+
+---
+
+## 配置项（环境变量 / `.env`）
+
+前缀 `NIC_OCR_`，也可直接写入 `.env` 文件。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `NIC_OCR_OCR_ENGINE` | `paddle` | OCR 引擎：`paddle` / `tesseract` |
+| `NIC_OCR_OCR_LANG` | `en` | 语言：PaddleOCR 用 `en`；Tesseract 用 `eng`（可加 `sin`） |
+| `NIC_OCR_PADDLE_USE_GPU` | `false` | 是否使用 GPU |
+| `NIC_OCR_PADDLE_USE_ANGLE_CLS` | `true` | 是否启用方向分类 |
+| `NIC_OCR_NIC_DAY_MODE` | `literal` | 出生日期解码模式：`literal` / `nic366`（见下） |
+| `NIC_OCR_OLD_NIC_CENTURY` | `1900` | 旧版号码两位年份的前缀 |
+| `NIC_OCR_HOST` | `0.0.0.0` | 监听地址 |
+| `NIC_OCR_PORT` | `8000` | 监听端口 |
+| `NIC_OCR_WORKERS` | `2` | uvicorn worker 数 |
+| `NIC_OCR_MAX_UPLOAD_BYTES` | `15728640` | 上传大小上限（15 MB） |
+
+---
+
+## NIC 号码解析规则与已知偏移
+
+斯里兰卡身份证号自 2016 年 1 月 1 日起从「9 位数字 + 字母」升级为「12 位数字」：
+
+- 旧版 `YY DDD SSS C V/X`：`YY` 出生年份后两位（按 1900 世纪解释），`DDD` 年内第几天，`SSS` 序列号，`C` 校验位，`V`=选民 / `X`=非选民。
+- 新版 `YYYY DDD SSSS C`：`YYYY` 完整出生年份，`DDD` 年内第几天，`SSSS` 序列号，`C` 校验位。
+- 性别：`DDD > 500` 表示女性（需减去 500 得到实际天数），否则为男性。
+
+**366 天日历偏移（重要）**：政府编号方案使用「固定 366 天日历」，每年都为 2 月 29 日预留一个位置。因此在非闰年、出生日在 3 月 1 日及之后时，号码中的 `DDD` 比真实「年内第几天」大 1。
+
+- 默认 `literal`：按字面天数解码（`Jan 1 + (DDD - 1)` 天），简单直观，但对非闰年 3 月之后的生日会偏大 1 天。
+- `nic366`：补偿 366 天日历，还原真实出生日期（3 月之后非闰年生日减 1 天）。
+
+由于卡片本身印刷了出生日期，本服务**优先采用 OCR 识别的印刷日期**，号码解码结果作为兜底与交叉校验；两者不一致时会写入 `warnings`。如需切换解码模式，设置 `NIC_OCR_NIC_DAY_MODE=nic366` 即可。
+
+> 参考：[DRP 官方 FAQ](https://drp.gov.lk/en/faq.php)、[Understanding Sri Lanka's NIC System](https://thesrilanka.lk/info/national-identity-card/understanding-sri-lankan-nic-system/)、[lk-id（TypeScript 实现，含 366 天日历说明）](https://www.npmjs.com/package/lk-id)、[lka-nic-decoder（Python 实现）](https://pypi.org/project/lka-nic-decoder/)。
+
+---
+
+## 性能与优化
+
+- **worker 数**：CPU 环境下建议 `workers = CPU 核数 / 2` 到 `CPU 核数` 之间；内存受限时降低 worker 数。
+- **GPU**：将 `requirements.txt` 中的 `paddlepaddle` 换成 `paddlepaddle-gpu==2.6.1`，并设置 `NIC_OCR_PADDLE_USE_GPU=true`；Compose 中取消 `deploy.resources` 注释。
+- **首次请求延迟**：服务启动时已预热模型（lifespan 中调用 `warmup()`），避免首个请求过慢。
+- **并发**：模型在进程内共享，`uvicorn --workers N` 会启动 N 个独立进程，各自加载一份模型。
+
+---
+
+## 健康检查与日志
+
+- 健康检查：`GET /health`，返回 `{"status":"ok"}`。
+- Docker Compose 已内置 healthcheck（每 30s 探测一次）。
+- 日志：Docker 用 `docker compose logs -f`；systemd 用 `journalctl -u nic-ocr -f`。
+
+---
+
+## 常见问题（FAQ）
+
+**Q：识别不出姓名/地址？**
+A：这些字段依赖卡片上「Name / Address」等标签。若识别为空，先检查图片是否清晰、方向是否端正；可在 `extractor.py` 的标签列表里补充实际卡片使用的措辞（含僧伽罗语/泰米尔语标签）。
+
+**Q：NIC 号码里混入了字母（如 0 识别成 O）？**
+A：`_find_nic` 已内置常见混淆纠正（O→0、I→1、S→5 等）。若仍失败，说明图片过糊，建议提高图片分辨率或改善光照。
+
+**Q：出生日期比真实早/晚一天？**
+A：多为 366 天日历偏移所致，见上文「已知偏移」，切换 `NIC_OCR_NIC_DAY_MODE=nic366` 后重启即可。
+
+**Q：校验位（最后一位）为何不做校验？**
+A：斯里兰卡 NIC 校验位算法未公开，无法可靠校验，故仅透传不校验。
+
+**Q：如何支持僧伽罗语姓名/地址？**
+A：Tesseract 支持 `sin` 语言包（`apt install tesseract-ocr-sin`），将 `NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin`。PaddleOCR 默认模型对僧伽罗语支持有限。
