@@ -303,7 +303,11 @@ nssm status NicOcr       # 查看状态
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `NIC_OCR_OCR_ENGINE` | `paddle` | OCR 引擎：`paddle` / `tesseract` |
-| `NIC_OCR_OCR_LANG` | `en` | 语言：PaddleOCR 用 `en`；Tesseract 用 `eng`（可加 `sin`） |
+| `NIC_OCR_OCR_LANG` | `en` | 语言：PaddleOCR 用 `en`；Tesseract 用 `eng` |
+| `NIC_OCR_NAME_OCR_ENGINE` | `tesseract` | 多语言姓名第二引擎：`tesseract` / `none`（关闭） |
+| `NIC_OCR_NAME_OCR_LANG` | `sin+tam` | 第二引擎语言包（Tesseract `+` 连接） |
+| `NIC_OCR_NAME_TESSERACT_PSM` | `6` | 第二引擎 Tesseract 页面分割模式 |
+| `NIC_OCR_TESSERACT_CMD` | 空 | tesseract 可执行文件路径（不在 PATH 时指定） |
 | `NIC_OCR_PADDLE_USE_GPU` | `false` | 是否使用 GPU |
 | `NIC_OCR_PADDLE_USE_ANGLE_CLS` | `true` | 是否启用方向分类 |
 | `NIC_OCR_NIC_DAY_MODE` | `nic366` | 出生日期解码模式：`nic366`（推荐，匹配真实出生日期）/ `literal`（见下） |
@@ -357,16 +361,36 @@ nssm status NicOcr       # 查看状态
 
 当前实现说明：
 
-- `name` 字段只返回**英文姓名**，且已支持跨行合并（`Name:` 标签下方的字母续行会自动拼接，见 `extractor.py` 的 `_find_full_name`）。
-- `name_sinhala` / `name_tamil` 为**占位字段**，当前固定返回 `null`，仅为保持 API 结构稳定预留。
-- 默认 OCR 引擎 PaddleOCR 的通用模型仅覆盖拉丁文字，对僧伽罗语/泰米尔语印刷体无法可靠识别（僧伽罗语在 PaddleOCR 支持语言列表中缺失，泰米尔语需单独的 `ta` 模型）。
-- 当画面中检测到僧伽罗语（Unicode `\u0D80-\u0DFF`）或泰米尔语（`\u0B80-\u0BFF`）字符时，响应 `warnings` 中会出现对应提示，便于调用方感知该 limitation。
+- `name` 字段返回**英文姓名**，且已支持跨行合并（`Name:` 标签下方的字母续行会自动拼接）。
+- `name_sinhala` / `name_tamil` 由**多语言姓名第二引擎**识别，默认为 Tesseract（`sin` + `tam` 语言包），与主引擎（PaddleOCR，仅拉丁文字）相互独立、互不影响。
+- 第二引擎在纠偏后的原图上运行一次，输出行级文本与坐标；抽取逻辑以**英文姓名区块为锚点**，从第二引擎结果中取垂直距离最近（其次水平重叠最大）的目标文字行——卡片顶部还有「ශ්‍රී ලංකා / இலங்கை」等标语，因此不能见文字就取。
+- 结果会清洗掉混入的非目标字符；僧伽罗语的零宽连接符（ZWJ/ZWNJ）会保留，保证合体字（如 `ශ්‍රී`）完整。
+- 第二引擎**永不阻断主流程**：启动时 `tesseract` 不可用或缺语言包会记录日志并降级（`name_sinhala`/`name_tamil` 返回 `null`）；若卡片上检测到对应文字但未能识别出姓名行，`warnings` 中会出现提示。
 
-后续若需补齐多语言姓名，可选方案：
+### 部署启用方式
 
-1. **Tesseract 混合语言包**：`apt install tesseract-ocr-sin tesseract-ocr-tam`，并设置 `NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin+tam`。精度一般，但零训练成本。
-2. **专用多语 OCR 引擎**（如 Tesseract 5 + 微调、EasyOCR 的 `si`/`ta`）：EasyOCR 支持 `si`（僧伽罗语）与 `ta`（泰米尔语），可作为第二引擎仅对姓名区域做补充识别。
-3. **云端 OCR API**：Google Cloud Vision 支持僧伽罗语/泰米尔语，识别质量最好，但需外网与密钥管理。
+**Docker（已内置，无需操作）**：镜像已安装 `tesseract-ocr`、`tesseract-ocr-sin`、`tesseract-ocr-tam`，默认启用。
+
+**Linux 裸机 / systemd**：
+
+```bash
+sudo apt install tesseract-ocr tesseract-ocr-sin tesseract-ocr-tam
+```
+
+**Windows**：从 [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) 安装 Tesseract（安装时勾选 Sinhala、Tamil 语言包），并在 `.env` 中指定路径：
+
+```ini
+NIC_OCR_TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+**关闭第二引擎**：设置 `NIC_OCR_NAME_OCR_ENGINE=none`。
+
+### 精度说明与替代方案
+
+Tesseract 对印刷体僧伽罗语/泰米尔语的精度一般，长姓名偶有个别字符识别错误。若需更高精度：
+
+1. **调整 PSM**：`NIC_OCR_NAME_TESSERACT_PSM` 默认 `6`（假设单一文本块），可试 `7`（单行）或 `11/12`（稀疏文本）。
+2. **云端 OCR API**：Google Cloud Vision 支持僧伽罗语/泰米尔语，质量最好，但需外网与密钥管理；可按 `ocr_engine.py` 的引擎接口封装替换第二引擎。
 
 ---
 
@@ -384,5 +408,5 @@ A：多为 366 天日历偏移所致，见上文「已知偏移」，切换 `NIC
 **Q：校验位（最后一位）为何不做校验？**
 A：斯里兰卡 NIC 校验位算法未公开，无法可靠校验，故仅透传不校验。
 
-**Q：如何支持僧伽罗语/泰米尔语姓名？**
-A：见上文「多语言姓名」小节。快速做法：Tesseract 装语言包后切引擎（`NIC_OCR_OCR_ENGINE=tesseract`、`NIC_OCR_OCR_LANG=eng+sin+tam`）；更稳的做法是用 EasyOCR（支持 `si`/`ta`）或 Google Cloud Vision 做第二引擎补充识别。
+**Q：name_sinhala / name_tamil 一直返回 null？**
+A：见上文「多语言姓名」。Linux 裸机部署需先 `apt install tesseract-ocr tesseract-ocr-sin tesseract-ocr-tam`；Windows 需安装 Tesseract 并设置 `NIC_OCR_TESSERACT_CMD`。第二引擎不可用时服务会记录启动日志（「多语言姓名第二引擎未启用」），主流程不受影响。

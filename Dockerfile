@@ -4,9 +4,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# 运行时系统库：OpenCV / PaddlePaddle 依赖
+# 运行时系统库：OpenCV / PaddlePaddle 依赖 + Tesseract（僧伽罗语/泰米尔语姓名第二引擎）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+    tesseract-ocr tesseract-ocr-sin tesseract-ocr-tam \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

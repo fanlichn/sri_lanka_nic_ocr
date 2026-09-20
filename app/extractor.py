@@ -44,6 +44,10 @@ _NON_NAME_KEYWORDS = (
 # 检测卡片上是否印有僧伽罗语/泰米尔语文字（Unicode 区段）
 _SINHALA_RE = re.compile(r"[\u0D80-\u0DFF]")
 _TAMIL_RE = re.compile(r"[\u0B80-\u0BFF]")
+# 清洗第二引擎文本：仅保留目标脚本字符、空白与零宽连接符
+# （ZWJ \u200D / ZWNJ \u200C 是僧伽罗语合体字如 'ශ්‍රී' 的一部分，必须保留）
+_SINHALA_CLEAN_RE = re.compile(r"[^\u0D80-\u0DFF\u200C\u200D\s]+")
+_TAMIL_CLEAN_RE = re.compile(r"[^\u0B80-\u0BFF\u200C\u200D\s]+")
 
 _DATE_FULL = [
     re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)"),
@@ -181,9 +185,16 @@ def _clean_name(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip(" .:：-")
 
 
-def _find_full_name(lines: List[OcrLine]) -> Optional[str]:
+def _find_full_name(
+    lines: List[OcrLine],
+) -> tuple[Optional[str], Optional[List[List[float]]]]:
     """English full name: the ``Name:`` label-line value plus any continuation
-    line(s) printed directly below it (NICs commonly wrap long names)."""
+    line(s) printed directly below it (NICs commonly wrap long names).
+
+    Returns ``(name, anchor_box)``; ``anchor_box`` is the bounding box of the
+    whole name block (label + merged lines), used to locate the multilingual
+    (Sinhala/Tamil) name printed next to it.
+    """
     best: Optional[tuple[OcrLine, str]] = None
     for ln in lines:
         for lbl in _NAME_LABELS:
@@ -200,8 +211,8 @@ def _find_full_name(lines: List[OcrLine]) -> Optional[str]:
             if any(t == lbl.lower() for lbl in _NAME_LABELS):
                 below = _value_from_line_below(i, lines, ln)
                 if below:
-                    return _clean_name(below)
-        return None
+                    return _clean_name(below), ln.box
+        return None, None
 
     label_ln, first_val = best
     parts = [first_val]
@@ -209,7 +220,7 @@ def _find_full_name(lines: List[OcrLine]) -> Optional[str]:
     label_y = _line_center_y(label_ln.box)
     label_x = label_ln.box[0][0]
 
-    conts: List[tuple[float, str]] = []
+    conts: List[OcrLine] = []
     for other in lines:
         if other is label_ln:
             continue
@@ -227,12 +238,63 @@ def _find_full_name(lines: List[OcrLine]) -> Optional[str]:
         low = text.lower()
         if any(k in low for k in _NON_NAME_KEYWORDS):
             continue
-        conts.append((y, text))
+        conts.append(other)
 
-    conts.sort(key=lambda t: t[0])
-    for _, text in conts[:2]:  # names wrap to at most 2 extra lines
-        parts.append(text)
-    return _clean_name(" ".join(parts))
+    conts.sort(key=lambda o: _line_center_y(o.box))
+    merged = conts[:2]  # names wrap to at most 2 extra lines
+    for other in merged:
+        parts.append(other.text.strip())
+    anchor = _union_box([label_ln.box] + [o.box for o in merged])
+    return _clean_name(" ".join(parts)), anchor
+
+
+def _union_box(boxes) -> List[List[float]]:
+    xs: List[float] = []
+    ys: List[float] = []
+    for box in boxes:
+        for p in box:
+            xs.append(p[0])
+            ys.append(p[1])
+    return [
+        [min(xs), min(ys)],
+        [max(xs), min(ys)],
+        [max(xs), max(ys)],
+        [min(xs), max(ys)],
+    ]
+
+
+def _pick_script_name(
+    secondary_lines: List[OcrLine],
+    anchor_box,
+    script_re: re.Pattern,
+    clean_re: re.Pattern,
+) -> Optional[str]:
+    """从第二引擎结果中挑出目标文字（僧伽罗语/泰米尔语）的姓名行。
+
+    卡片顶部还有「ශ්‍රී ලංකා」等僧伽罗语/泰米尔语标语，因此不能见文字就取：
+    以英文姓名区块为锚点，取垂直距离最近（其次水平重叠最大）的那一行，
+    再清洗掉混入的非目标字符。
+    """
+    a_top = min(p[1] for p in anchor_box)
+    a_bottom = max(p[1] for p in anchor_box)
+    a_left = min(p[0] for p in anchor_box)
+    a_right = max(p[0] for p in anchor_box)
+    best: Optional[tuple[tuple, str]] = None
+    for ln in secondary_lines:
+        text = (ln.text or "").strip()
+        if not text or not script_re.search(text):
+            continue
+        ys = [p[1] for p in ln.box]
+        xs = [p[0] for p in ln.box]
+        gap = max(a_top - max(ys), min(ys) - a_bottom, 0.0)
+        x_overlap = min(a_right, max(xs)) - max(a_left, min(xs))
+        key = (gap, -x_overlap)
+        if best is None or key < best[0]:
+            best = (key, text)
+    if best is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", clean_re.sub(" ", best[1])).strip()
+    return cleaned or None
 
 
 def _find_date_anywhere(lines: List[OcrLine]) -> Optional[str]:
@@ -255,7 +317,16 @@ def _normalize_gender(s: Optional[str]) -> Optional[str]:
     return None
 
 
-def extract(lines: List[OcrLine], settings) -> ExtractedResult:
+def extract(
+    lines: List[OcrLine],
+    settings,
+    secondary_lines: Optional[List[OcrLine]] = None,
+) -> ExtractedResult:
+    """从 OCR 行中抽取字段。
+
+    ``secondary_lines`` 是多语言姓名第二引擎（Tesseract sin+tam）的识别结果，
+    可为 None（第二引擎未启用或不可用）。
+    """
     warnings: List[str] = []
 
     nic_text, nic_note = _find_nic(lines)
@@ -271,18 +342,35 @@ def extract(lines: List[OcrLine], settings) -> ExtractedResult:
         elif nic_note:
             warnings.append(f"NIC 号码({nic_text}) {nic_note}，请人工复核")
 
-    name = _find_full_name(lines)
+    name, name_anchor = _find_full_name(lines)
     dob_printed = _extract_label(lines, _DOB_LABELS)
     gender_printed = _normalize_gender(_extract_label(lines, _GENDER_LABELS))
     address = _extract_label(lines, _ADDRESS_LABELS)
     issue_date = _extract_label(lines, _ISSUE_LABELS)
 
-    # 僧伽罗语/泰米尔语姓名占位：当前引擎仅支持拉丁文字
+    # 僧伽罗语/泰米尔语姓名：以英文姓名区块为锚点，从第二引擎结果中就近选取
     full_text = " ".join(l.text for l in lines)
-    if _SINHALA_RE.search(full_text):
-        warnings.append("检测到僧伽罗语文字，name_sinhala 字段暂不支持识别")
-    if _TAMIL_RE.search(full_text):
-        warnings.append("检测到泰米尔语文字，name_tamil 字段暂不支持识别")
+    has_sinhala = _SINHALA_RE.search(full_text) is not None
+    has_tamil = _TAMIL_RE.search(full_text) is not None
+    name_sinhala: Optional[str] = None
+    name_tamil: Optional[str] = None
+    if secondary_lines and name_anchor:
+        name_sinhala = _pick_script_name(
+            secondary_lines, name_anchor, _SINHALA_RE, _SINHALA_CLEAN_RE
+        )
+        name_tamil = _pick_script_name(
+            secondary_lines, name_anchor, _TAMIL_RE, _TAMIL_CLEAN_RE
+        )
+    if has_sinhala and not name_sinhala:
+        warnings.append(
+            "卡片含僧伽罗语文字但未能识别出姓名行，"
+            "请检查第二引擎是否已安装（tesseract-ocr-sin/tam 语言包）"
+        )
+    if has_tamil and not name_tamil:
+        warnings.append(
+            "卡片含泰米尔语文字但未能识别出姓名行，"
+            "请检查第二引擎是否已安装（tesseract-ocr-sin/tam 语言包）"
+        )
 
     dob_iso = _normalize_date(dob_printed) if dob_printed else None
     if not dob_iso:
@@ -317,6 +405,8 @@ def extract(lines: List[OcrLine], settings) -> ExtractedResult:
         nic_number=nic_text,
         nic=nic_out,
         name=name,
+        name_sinhala=name_sinhala,
+        name_tamil=name_tamil,
         date_of_birth=dob_iso or (nic_info.birth_date if nic_info else None),
         gender=gender,
         address=address,

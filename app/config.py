@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # False: reject URLs resolving to private/loopback addresses (SSRF guard)
     url_fetch_allow_private_hosts: bool = False
 
+    # ---- 多语言姓名第二引擎（僧伽罗语/泰米尔语） ----
+    # "none": 关闭；"tesseract": 用 Tesseract sin+tam 补充识别（需安装系统语言包）
+    name_ocr_engine: str = "tesseract"
+    # Tesseract 语言串："sin+tam"；只需其中一种时可改为 "sin" 或 "tam"
+    name_ocr_lang: str = "sin+tam"
+    # Tesseract 页面分割模式（psm），整卡识别常用 6；漏检时可试 3 / 11
+    name_tesseract_psm: int = 6
+    # Tesseract 可执行文件路径；Linux 已在 PATH 时留空即可
+    tesseract_cmd: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:
